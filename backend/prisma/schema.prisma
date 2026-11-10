@@ -1,0 +1,503 @@
+// Pawzora – SQL Server schema.
+// SQL Server has no enums / scalar lists / Json in Prisma, so status-like fields are strings
+// whose allowed values are validated in the API (see src/lib/constants.ts).
+// NOTE: SQL Server allows only ONE NULL in a unique index, so no nullable columns are @unique.
+
+generator client {
+  provider      = "prisma-client-js"
+  // "native" = the machine you build on; rhel-openssl-3.0.x = Amazon Linux 2023 (so a build made elsewhere still runs on EC2)
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlserver"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────── Auth ─────────────
+model Role {
+  id    Int    @id @default(autoincrement())
+  name  String @unique @db.NVarChar(30) // CUSTOMER | ADMIN
+  users User[]
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique @db.NVarChar(190)
+  passwordHash String   @db.NVarChar(120)
+  fullName     String   @db.NVarChar(120)
+  phone        String?  @db.NVarChar(30)
+  avatarUrl    String?  @db.NVarChar(300)
+  roleId       Int
+  role         Role     @relation(fields: [roleId], references: [id])
+  status       String   @default("ACTIVE") @db.NVarChar(20) // ACTIVE | SUSPENDED
+  notifyOrders Boolean  @default(true)
+  notifyPromos Boolean  @default(true)
+  isDemo       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions     UserSession[]
+  addresses    ShippingAddress[]
+  carts        Cart[]
+  orders       Order[]
+  wishlist     Wishlist[]
+  reviews      Review[]
+  pets         Pet[]
+  applications AdoptionApplication[]
+  notifications Notification[]
+  posts        BlogPost[]
+  redemptions  CouponRedemption[]
+  auditLogs    AdminAuditLog[]
+
+  @@index([roleId])
+}
+
+model UserSession {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique @db.NVarChar(100)
+  userAgent String?  @db.NVarChar(300)
+  ip        String?  @db.NVarChar(60)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ───────────── Catalog ─────────────
+// kind = PRODUCT (Food & Treats, Toys…) or PET (Dogs, Cats…)
+model Category {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.NVarChar(80)
+  slug      String   @unique @db.NVarChar(100)
+  kind      String   @db.NVarChar(10)
+  imageUrl  String?  @db.NVarChar(300)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[] @relation("ProductCategory")
+  petProducts Product[] @relation("ProductPetType")
+
+  @@index([kind, sortOrder])
+}
+
+model Product {
+  id          Int       @id @default(autoincrement())
+  name        String    @db.NVarChar(160)
+  slug        String    @unique @db.NVarChar(190)
+  description String    @db.NVarChar(Max)
+  brand       String    @db.NVarChar(80)
+  price       Decimal   @db.Decimal(10, 2)
+  salePrice   Decimal?  @db.Decimal(10, 2)
+  saleEndsAt  DateTime?
+  categoryId  Int
+  category    Category  @relation("ProductCategory", fields: [categoryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  petTypeId   Int
+  petType     Category  @relation("ProductPetType", fields: [petTypeId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  ratingAvg   Float     @default(0)
+  reviewCount Int       @default(0)
+  soldCount   Int       @default(0)
+  isFeatured  Boolean   @default(false)
+  isActive    Boolean   @default(true)
+  isDemo      Boolean   @default(false)
+  archivedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  images     ProductImage[]
+  variants   ProductVariant[]
+  inventory  Inventory?
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+  wishlist   Wishlist[]
+  reviews    Review[]
+
+  @@index([categoryId])
+  @@index([petTypeId])
+  @@index([isActive, isFeatured])
+  @@index([price])
+}
+
+model ProductImage {
+  id        Int     @id @default(autoincrement())
+  productId Int
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String  @db.NVarChar(300)
+  alt       String? @db.NVarChar(160)
+  sortOrder Int     @default(0)
+
+  @@index([productId])
+}
+
+model ProductVariant {
+  id         Int     @id @default(autoincrement())
+  productId  Int
+  product    Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name       String  @db.NVarChar(80) // e.g. "Size M / Blue"
+  sku        String  @unique @db.NVarChar(60)
+  priceDelta Decimal @default(0) @db.Decimal(10, 2)
+  stock      Int     @default(0)
+
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@index([productId])
+}
+
+model Inventory {
+  id                Int      @id @default(autoincrement())
+  productId         Int      @unique
+  product           Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity          Int      @default(0)
+  lowStockThreshold Int      @default(5)
+  updatedAt         DateTime @updatedAt
+}
+
+// ───────────── Cart & Orders ─────────────
+model Cart {
+  id         Int        @id @default(autoincrement())
+  userId     Int?
+  user       User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  guestToken String?    @db.NVarChar(80)
+  couponCode String?    @db.NVarChar(40)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  items      CartItem[]
+
+  @@index([userId])
+  @@index([guestToken])
+}
+
+model CartItem {
+  id        Int             @id @default(autoincrement())
+  cartId    Int
+  cart      Cart            @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId Int
+  product   Product         @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  variantId Int?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  quantity  Int             @default(1)
+  createdAt DateTime        @default(now())
+
+  @@unique([cartId, productId, variantId])
+}
+
+model Order {
+  id            Int      @id @default(autoincrement())
+  orderNumber   String   @unique @db.NVarChar(30)
+  userId        Int?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  email         String   @db.NVarChar(190)
+  // PENDING | CONFIRMED | PROCESSING | SHIPPED | DELIVERED | CANCELLED
+  status        String   @default("PENDING") @db.NVarChar(20)
+  // UNPAID | PAID | FAILED | REFUNDED
+  paymentStatus String   @default("UNPAID") @db.NVarChar(20)
+  paymentMethod String   @db.NVarChar(20) // COD | GCASH | MAYA | CARD
+  shippingMethod String  @default("STANDARD") @db.NVarChar(20)
+  subtotal      Decimal  @db.Decimal(10, 2)
+  shippingFee   Decimal  @db.Decimal(10, 2)
+  discountTotal Decimal  @default(0) @db.Decimal(10, 2)
+  total         Decimal  @db.Decimal(10, 2)
+  couponCode    String?  @db.NVarChar(40)
+  shipName      String   @db.NVarChar(120)
+  shipPhone     String   @db.NVarChar(30)
+  shipAddress   String   @db.NVarChar(300)
+  shipBarangay  String   @db.NVarChar(100)
+  shipCity      String   @db.NVarChar(100)
+  shipProvince  String   @db.NVarChar(100)
+  shipPostal    String   @db.NVarChar(12)
+  notes         String?  @db.NVarChar(500)
+  isDemo        Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  items       OrderItem[]
+  payments    Payment[]
+  shipments   Shipment[]
+  redemptions CouponRedemption[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id         Int             @id @default(autoincrement())
+  orderId    Int
+  order      Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId  Int
+  product    Product         @relation(fields: [productId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  variantId  Int?
+  variant    ProductVariant? @relation(fields: [variantId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  name       String          @db.NVarChar(160) // snapshot
+  imageUrl   String?         @db.NVarChar(300)
+  unitPrice  Decimal         @db.Decimal(10, 2)
+  quantity   Int
+  lineTotal  Decimal         @db.Decimal(10, 2)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model Payment {
+  id          Int       @id @default(autoincrement())
+  orderId     Int
+  order       Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  provider    String    @db.NVarChar(20) // COD | GCASH | MAYA | CARD
+  providerRef String?   @db.NVarChar(120) // set only from verified provider responses
+  amount      Decimal   @db.Decimal(10, 2)
+  status      String    @default("PENDING") @db.NVarChar(20) // PENDING | PAID | FAILED | REFUNDED
+  paidAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([orderId])
+}
+
+model ShippingAddress {
+  id         Int      @id @default(autoincrement())
+  userId     Int
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label      String   @default("Home") @db.NVarChar(40)
+  fullName   String   @db.NVarChar(120)
+  phone      String   @db.NVarChar(30)
+  line1      String   @db.NVarChar(300)
+  barangay   String   @db.NVarChar(100)
+  city       String   @db.NVarChar(100)
+  province   String   @db.NVarChar(100)
+  postalCode String   @db.NVarChar(12)
+  isDefault  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model Shipment {
+  id             Int       @id @default(autoincrement())
+  orderId        Int
+  order          Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  carrier        String    @db.NVarChar(60)
+  trackingNumber String?   @db.NVarChar(80)
+  status         String    @default("PREPARING") @db.NVarChar(20) // PREPARING | IN_TRANSIT | DELIVERED
+  shippedAt      DateTime?
+  deliveredAt    DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([orderId])
+}
+
+// ───────────── Engagement ─────────────
+model Wishlist {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, productId])
+}
+
+model Review {
+  id         Int      @id @default(autoincrement())
+  productId  Int
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  userId     Int?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  authorName String   @db.NVarChar(80)
+  rating     Int
+  title      String?  @db.NVarChar(120)
+  body       String   @db.NVarChar(1500)
+  status     String   @default("PUBLISHED") @db.NVarChar(12) // PUBLISHED | HIDDEN
+  isDemo     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([productId, status])
+}
+
+model Pet {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String    @db.NVarChar(80)
+  species   String    @db.NVarChar(40)
+  breed     String?   @db.NVarChar(80)
+  birthDate DateTime?
+  gender    String?   @db.NVarChar(12)
+  photoUrl  String?   @db.NVarChar(300)
+  notes     String?   @db.NVarChar(500)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+// ───────────── Adoption ─────────────
+model AdoptionListing {
+  id           Int      @id @default(autoincrement())
+  name         String   @db.NVarChar(80)
+  species      String   @db.NVarChar(40)
+  breed        String   @db.NVarChar(80)
+  ageMonths    Int
+  gender       String   @db.NVarChar(12)
+  description  String   @db.NVarChar(Max)
+  status       String   @default("AVAILABLE") @db.NVarChar(20) // AVAILABLE | PENDING | ADOPTED
+  location     String   @db.NVarChar(120)
+  requirements String   @db.NVarChar(600)
+  photoUrl     String?  @db.NVarChar(300)
+  isDemo       Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  applications AdoptionApplication[]
+
+  @@index([status])
+}
+
+model AdoptionApplication {
+  id              Int             @id @default(autoincrement())
+  listingId       Int
+  listing         AdoptionListing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  userId          Int
+  user            User            @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  applicantName   String          @db.NVarChar(120)
+  email           String          @db.NVarChar(190)
+  phone           String          @db.NVarChar(30)
+  address         String          @db.NVarChar(300)
+  livingSituation String          @db.NVarChar(300)
+  experience      String          @db.NVarChar(600)
+  reason          String          @db.NVarChar(800)
+  status          String          @default("PENDING") @db.NVarChar(20) // PENDING | UNDER_REVIEW | APPROVED | REJECTED
+  adminNote       String?         @db.NVarChar(500)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@index([listingId])
+  @@index([userId])
+  @@index([status])
+}
+
+// ───────────── Blog ─────────────
+model BlogCategory {
+  id    Int        @id @default(autoincrement())
+  name  String     @db.NVarChar(80)
+  slug  String     @unique @db.NVarChar(100)
+  posts BlogPost[]
+}
+
+model BlogPost {
+  id          Int          @id @default(autoincrement())
+  title       String       @db.NVarChar(200)
+  slug        String       @unique @db.NVarChar(220)
+  excerpt     String       @db.NVarChar(400)
+  content     String       @db.NVarChar(Max)
+  coverUrl    String?      @db.NVarChar(300)
+  categoryId  Int
+  category    BlogCategory @relation(fields: [categoryId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  authorId    Int?
+  author      User?        @relation(fields: [authorId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  status      String       @default("DRAFT") @db.NVarChar(12) // DRAFT | PUBLISHED
+  readMinutes Int          @default(4)
+  isDemo      Boolean      @default(false)
+  publishedAt DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([status, publishedAt])
+  @@index([categoryId])
+}
+
+// ───────────── Promotions ─────────────
+model Coupon {
+  id          Int       @id @default(autoincrement())
+  code        String    @unique @db.NVarChar(40)
+  type        String    @db.NVarChar(10) // PERCENT | FIXED
+  value       Decimal   @db.Decimal(10, 2)
+  minSubtotal Decimal   @default(0) @db.Decimal(10, 2)
+  startsAt    DateTime?
+  expiresAt   DateTime?
+  usageLimit  Int?
+  usedCount   Int       @default(0)
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+
+  redemptions CouponRedemption[]
+}
+
+model CouponRedemption {
+  id        Int      @id @default(autoincrement())
+  couponId  Int
+  coupon    Coupon   @relation(fields: [couponId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  userId    Int?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  orderId   Int
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@index([couponId])
+}
+
+// ───────────── Misc ─────────────
+model NewsletterSubscriber {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique @db.NVarChar(190)
+  createdAt DateTime @default(now())
+}
+
+model ContactMessage {
+  id        Int       @id @default(autoincrement())
+  name      String    @db.NVarChar(120)
+  email     String    @db.NVarChar(190)
+  subject   String    @db.NVarChar(160)
+  message   String    @db.NVarChar(2000)
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+}
+
+model Notification {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String    @db.NVarChar(160)
+  body      String    @db.NVarChar(500)
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+}
+
+model AdminAuditLog {
+  id        Int      @id @default(autoincrement())
+  adminId   Int?
+  admin     User?    @relation(fields: [adminId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  action    String   @db.NVarChar(60)
+  entity    String   @db.NVarChar(40)
+  entityId  String?  @db.NVarChar(40)
+  details   String?  @db.NVarChar(1000)
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model StoreSettings {
+  id    Int    @id @default(autoincrement())
+  key   String @unique @db.NVarChar(60)
+  value String @db.NVarChar(1000)
+}
+
+// ───────────── Password reset ─────────────
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  tokenHash String    @unique @db.NVarChar(100)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
